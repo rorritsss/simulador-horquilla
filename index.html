@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Simulador Grúa Horquilla</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #bfd1e5; font-family: system-ui, 'Segoe UI', Arial, sans-serif; }
+  .panel { position: fixed; background: rgba(12, 22, 34, .78); color: #fff; border-radius: 8px; }
+  #hud { left: 12px; top: 12px; padding: 10px 14px; font-size: 14px; line-height: 1.55; min-width: 230px; }
+  #hud b { color: #ffd34d; }
+  #msg { left: 50%; top: 22vh; transform: translateX(-50%); padding: 8px 18px; font-size: 17px; display: none; max-width: 70vw; text-align: center; }
+  #help { left: 12px; bottom: 12px; padding: 8px 12px; font-size: 12px; line-height: 1.5; color: #dde; max-width: 60vw; }
+  #menu { position: fixed; right: 12px; top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  button { font: inherit; font-size: 14px; padding: 7px 12px; border-radius: 6px; border: 1px solid #889; background: #fff; cursor: pointer; }
+  button.on { background: #ffd34d; border-color: #b8901a; }
+  #cfg { position: fixed; inset: 4vh 6vw; background: #fff; border-radius: 10px; padding: 14px 22px; overflow: auto; display: none; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  #cfg table { border-collapse: collapse; width: 100%; }
+  #cfg td { padding: 5px 8px; border-bottom: 1px solid #eee; }
+  #cfg td.b { color: #456; font-family: monospace; }
+  #raw { font-family: monospace; font-size: 12px; white-space: pre-wrap; background: #f3f5f8; padding: 8px; border-radius: 6px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="hud" class="panel"></div>
+<div id="msg" class="panel"></div>
+<div id="menu">
+  <button data-mode="conos">Circuito de conos</button>
+  <button data-mode="rack">Pallet a rack</button>
+  <button data-mode="libre">Libre</button>
+  <button id="btnCam">Cámara (C)</button>
+  <button id="btnCfg">⚙ Volante</button>
+</div>
+<div id="help" class="panel">
+  Teclado: W/S acelerar·frenar · A/D dirección · E/Q marcha adelante/atrás · R/F subir/bajar horquillas ·
+  T/G inclinar mástil atrás/adelante · C cámara · Retroceso reinicia.<br>
+  Ojo: la dirección va en las ruedas traseras, la cola barre hacia afuera en las curvas.
+</div>
+<div id="cfg">
+  <h2>Configurar volante</h2>
+  <p>1) Conecta el volante y <b>presiona cualquier botón</b> para que el navegador lo detecte.
+     2) Pulsa <b>Asignar</b> y mueve el control que se pide (los ejes: llévalos a fondo y mantén 1 segundo). Esc cancela.</p>
+  <table id="binds"></table>
+  <p><button id="cfgClose">Cerrar</button> <button id="cfgReset">Borrar configuración</button></p>
+  <h3>Lectura en vivo</h3>
+  <div id="raw">Sin mandos detectados: presiona un botón del volante.</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+// ---------------- escena ----------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xbfd1e5);
+scene.fog = new THREE.Fog(0xbfd1e5, 45, 95);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.0));
+const sun = new THREE.DirectionalLight(0xffffff, 1.3);
+sun.position.set(18, 30, 8);
+sun.castShadow = true;
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40 });
+sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshStandardMaterial({ color: 0x9a9a95 }));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+const grid = new THREE.GridHelper(80, 40, 0x777777, 0x888888); grid.position.y = 0.002; scene.add(grid);
+
+function box(w, h, d, color, x = 0, y = 0, z = 0, parent = scene) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color }));
+  m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; parent.add(m); return m;
+}
+const mark = (x, z, w, d, color = 0xffd34d) => { const m = box(w, 0.01, d, color, x, 0.006, z); m.castShadow = false; };
+
+// ---------------- grúa horquilla ----------------
+// Origen = centro del eje delantero (ruedas fijas). Adelante = +z local. Dirección en el eje trasero.
+const L = 1.4, MAXSTEER = 65 * Math.PI / 180;
+const truck = new THREE.Group(); scene.add(truck);
+const YEL = 0xf2b400, DARK = 0x262626;
+box(1.1, 1.0, 2.3, YEL, 0, 0.8, -0.75, truck);
+box(1.1, 0.7, 0.5, 0x3a3a3a, 0, 1.0, -1.75, truck);          // contrapeso
+box(0.5, 0.1, 0.5, DARK, 0, 1.35, -0.9, truck);               // asiento
+box(0.5, 0.6, 0.1, DARK, 0, 1.65, -1.15, truck);
+for (const x of [-0.5, 0.5]) for (const z of [-0.15, -1.25]) box(0.06, 0.9, 0.06, DARK, x, 1.75, z, truck);
+box(1.1, 0.06, 1.2, DARK, 0, 2.2, -0.7, truck);               // techo protector
+const wheelGeo = new THREE.CylinderGeometry(1, 1, 1, 20); wheelGeo.rotateZ(Math.PI / 2);
+const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+function wheel(r, w, x, z, parent) {
+  const m = new THREE.Mesh(wheelGeo, wheelMat);
+  m.scale.set(w, r, r); m.position.set(x, r, z); m.castShadow = true; parent.add(m); return m;
+}
+const frontWheels = [wheel(0.32, 0.25, -0.5, 0, truck), wheel(0.32, 0.25, 0.5, 0, truck)];
+const rearPivots = [-0.45, 0.45].map(x => { const g = new THREE.Group(); g.position.set(x, 0, -L); truck.add(g); wheel(0.25, 0.2, 0, 0, g); return g; });
+const mast = new THREE.Group(); mast.position.set(0, 0, 0.5); truck.add(mast);
+box(0.08, 2.5, 0.1, DARK, -0.35, 1.25, 0, mast);
+box(0.08, 2.5, 0.1, DARK, 0.35, 1.25, 0, mast);
+box(0.78, 0.08, 0.1, DARK, 0, 2.5, 0, mast);
+const carriage = new THREE.Group(); mast.add(carriage);
+box(0.9, 0.9, 0.05, 0x444444, 0, 0.5, 0.08, carriage);
+for (const x of [-0.3, 0.3]) {
+  box(0.12, 0.05, 1.2, 0x777777, x, 0.025, 0.7, carriage);    // uñas: z local de la grúa 0.6 → 1.8
+  box(0.12, 0.5, 0.05, 0x777777, x, 0.25, 0.12, carriage);
+}
+
+// ---------------- mundo: conos, rack, pallets ----------------
+const CONE_X = -12, CONE_Z = [6, 11, 16, 21], END_Z = 26;
+const coneGeo = new THREE.ConeGeometry(0.18, 0.7, 16); coneGeo.translate(0, 0.35, 0);
+const cones = CONE_Z.map(z => {
+  const m = new THREE.Mesh(coneGeo, new THREE.MeshStandardMaterial({ color: 0xff6a00 }));
+  m.castShadow = true; scene.add(m); return { m, x: CONE_X, z, active: true };
+});
+mark(CONE_X, 2, 2.6, 0.08); mark(CONE_X, END_Z, 6, 0.08, 0xffffff);
+mark(CONE_X - 1.3, -0.6, 0.08, 5.2); mark(CONE_X + 1.3, -0.6, 0.08, 5.2); mark(CONE_X, -3.2, 2.6, 0.08);
+
+const RACK = { x: 10, z: 16, levels: [1.5, 3.0] };
+const posts = [];
+for (const dx of [-0.8, 0.8]) for (const dz of [-0.65, 0.65]) {
+  box(0.1, 3.3, 0.1, 0x1f5fa8, RACK.x + dx, 1.65, RACK.z + dz);
+  posts.push({ x: RACK.x + dx, z: RACK.z + dz });
+}
+const beams = [];
+for (const lv of RACK.levels) for (const dz of [-0.6, 0.6]) {
+  box(1.6, 0.1, 0.08, 0xe0641b, RACK.x, lv - 0.05, RACK.z + dz);
+  beams.push({ o: obb(RACK.x, RACK.z + dz, 0.8, 0.04, 0), y0: lv - 0.1, y1: lv });
+}
+mark(10, 6, 1.6, 0.06); mark(10, 6, 0.06, 1.8);   // zona del pallet
+
+const PH = 0.85;                                   // alto pallet + carga
+function makePallet() {
+  const g = new THREE.Group();
+  box(1.0, 0.03, 1.2, 0xb58a57, 0, 0.135, 0, g);
+  for (const x of [-0.45, 0, 0.45]) box(0.1, 0.12, 1.2, 0xa07040, x, 0.06, 0, g);
+  box(0.9, 0.7, 1.1, 0xc9a26b, 0, 0.5, 0, g);
+  scene.add(g); return { g, base: 0 };
+}
+const PALLET_START = [[10, 6, 0], [3, 5, 0], [3, 9, Math.PI / 2], [-4, 14, 0.3]];
+const pallets = PALLET_START.map(makePallet);
+
+// ---------------- geometría de colisión (2D en planta + rango de altura) ----------------
+function obb(cx, cz, hw, hd, yaw) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  return { cx, cz, hw, hd, ax: [[c, -s], [s, c]] };   // ejes x y z locales en el mundo
+}
+function toW(st, lx, lz) {
+  const c = Math.cos(st.yaw), s = Math.sin(st.yaw);
+  return [st.x + lx * c + lz * s, st.z - lx * s + lz * c];
+}
+const EPS = 0.01;
+function proj(o, a) {
+  const c = o.cx * a[0] + o.cz * a[1];
+  const r = o.hw * Math.abs(o.ax[0][0] * a[0] + o.ax[0][1] * a[1]) + o.hd * Math.abs(o.ax[1][0] * a[0] + o.ax[1][1] * a[1]);
+  return [c - r, c + r];
+}
+function sat(a, b) {
+  for (const o of [a, b]) for (const ax of o.ax) {
+    const pa = proj(a, ax), pb = proj(b, ax);
+    if (pa[1] < pb[0] + EPS || pb[1] < pa[0] + EPS) return false;
+  }
+  return true;
+}
+function circleHit(o, x, z, r) {
+  const dx = x - o.cx, dz = z - o.cz;
+  const lx = dx * o.ax[0][0] + dz * o.ax[0][1], lz = dx * o.ax[1][0] + dz * o.ax[1][1];
+  const qx = lx - clamp(lx, -o.hw, o.hw), qz = lz - clamp(lz, -o.hd, o.hd);
+  return qx * qx + qz * qz < (r - EPS) * (r - EPS);
+}
+const yOver = (a0, a1, b0, b1) => a0 < b1 - 0.005 && b0 < a1 - 0.005;
+const palletPose = p => ({ x: p.g.position.x, z: p.g.position.z, yaw: p.g.rotation.y });
+
+// ¿Las uñas están dentro de los bolsillos del pallet? (alineadas, centradas y a la altura correcta)
+function pocketOK(st, p) {
+  const pp = palletPose(p);
+  const fx = Math.sin(st.yaw), fz = Math.cos(st.yaw);
+  if (Math.abs(fx * Math.sin(pp.yaw) + fz * Math.cos(pp.yaw)) < Math.cos(8 * Math.PI / 180)) return false;
+  const [cx, cz] = toW(st, 0, 1.2);
+  const lat = (cx - pp.x) * Math.cos(pp.yaw) - (cz - pp.z) * Math.sin(pp.yaw);
+  return Math.abs(lat) < 0.08 && st.forkH >= p.base - 0.06 && st.forkH <= p.base + 0.07;
+}
+function insertion(st, p) {
+  const pp = palletPose(p), [tx, tz] = toW(st, 0, 1.8);
+  return (tx - pp.x) * Math.sin(st.yaw) + (tz - pp.z) * Math.cos(st.yaw) + 0.6;
+}
+
+function parts(st) {
+  const ps = [
+    { o: obb(...toW(st, 0, -0.67), 0.58, 1.25, st.yaw), y0: 0, y1: 2.2, part: 'cuerpo' },
+    { o: obb(...toW(st, 0, 1.2), 0.36, 0.6, st.yaw), y0: st.forkH, y1: st.forkH + 0.05, part: 'horquillas' },
+  ];
+  if (S.carry) {
+    const c = S.carry, b = st.forkH - 0.07;
+    ps.push({ o: obb(...toW(st, c.lx, c.lz), 0.5, 0.6, st.yaw + c.lyaw), y0: b, y1: b + PH, part: 'carga' });
+  }
+  return ps;
+}
+function collide(st) {
+  const block = [], hitCones = [];
+  for (const pt of parts(st)) {
+    const o = pt.o, ext = Math.max(o.hw, o.hd);
+    if (Math.abs(o.cx) + ext > 39.5 || Math.abs(o.cz) + ext > 39.5) block.push('pared');
+    for (const q of posts) if (circleHit(o, q.x, q.z, 0.06)) block.push('rack');
+    for (const bm of beams) if (yOver(pt.y0, pt.y1, bm.y0, bm.y1) && sat(o, bm.o)) block.push('rack');
+    for (const c of cones) if (c.active && yOver(pt.y0, pt.y1, 0, 0.7) && circleHit(o, c.x, c.z, 0.18)) hitCones.push(c);
+    for (const p of pallets) {
+      if (S.carry && S.carry.p === p) continue;
+      if (!yOver(pt.y0, pt.y1, p.base, p.base + PH)) continue;
+      const pp = palletPose(p);
+      if (!sat(o, obb(pp.x, pp.z, 0.5, 0.6, pp.yaw))) continue;
+      if (pt.part === 'horquillas' && pocketOK(st, p)) continue;
+      block.push('pallet');
+    }
+  }
+  return { block, hitCones };
+}
+
+// ---------------- estado ----------------
+const S = { x: 0, z: 0, yaw: 0, v: 0, steer: 0, gear: 'N', forkH: 0.1, tilt: 0, carry: null };
+let prevZ = 0;
+const G = { mode: 'conos', phase: '', running: false, t: 0, pen: 0, last: {}, cam: 0, camYaw: 0 };
+const MODES = {
+  conos: { start: [CONE_X, -1, 0], intro: 'Zigzag: pasa el primer cono por su lado izquierdo (déjalo a tu derecha) y alterna. Cruza la línea blanca y vuelve en REVERSA al cuadro de partida.' },
+  rack: { start: [10, 0, 0], intro: 'Toma el pallet, déjalo en el primer nivel del rack (1,5 m) y retrocede con las horquillas abajo.' },
+  libre: { start: [0, -6, 0], intro: 'Modo libre: practica a tu ritmo. Hay pallets sueltos y un rack de 2 niveles.' },
+};
+
+function reset(mode = G.mode) {
+  G.mode = mode;
+  const [x, z, yaw] = MODES[mode].start;
+  Object.assign(S, { x, z, yaw, v: 0, steer: 0, gear: 'N', forkH: 0.1, tilt: 0, carry: null });
+  Object.assign(G, { phase: 'listo', running: false, t: 0, pen: 0, last: {} });
+  prevZ = S.z;
+  cones.forEach(c => { c.active = true; c.m.position.set(c.x, 0, c.z); c.m.rotation.set(0, 0, 0); });
+  pallets.forEach((p, i) => { const [px, pz, pyaw] = PALLET_START[i]; p.base = 0; p.g.position.set(px, 0, pz); p.g.rotation.set(0, pyaw, 0); });
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  say(MODES[mode].intro, 6000);
+}
+
+let msgTimer = 0;
+function say(text, ms = 2500) {
+  const el = $('msg'); el.textContent = text; el.style.display = 'block';
+  clearTimeout(msgTimer); msgTimer = setTimeout(() => el.style.display = 'none', ms);
+}
+function penal(key, secs, text, cooldown = 1.5) {
+  const now = performance.now() / 1000;
+  if (now - (G.last[key] ?? -99) < cooldown) return;
+  G.last[key] = now;
+  if (G.mode !== 'libre') G.pen += secs;
+  say(G.mode === 'libre' ? text : `${text} (+${secs} s)`);
+}
+const fmt = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+function finish() {
+  G.running = false; G.phase = 'fin';
+  const total = G.t + G.pen, key = 'mejor-' + G.mode, best = store.get(key);
+  const record = best == null || total < best;
+  if (record) store.set(key, total);
+  say(`¡Terminado! ${fmt(G.t)} + ${G.pen} s de penalización = ${fmt(total)}${record ? ' · ¡Nuevo récord!' : ''}`, 10000);
+}
+
+// ---------------- entrada: volante (Gamepad API) + teclado ----------------
+const ACTIONS = [
+  ['direccion', 'Dirección: gira a fondo a la DERECHA'],
+  ['acelerador', 'Acelerador: písalo a fondo'],
+  ['freno', 'Freno: písalo a fondo'],
+  ['marchaArriba', 'Marcha adelante (subir cambio)'],
+  ['marchaAbajo', 'Marcha atrás (bajar cambio)'],
+  ['subir', 'Subir horquillas'],
+  ['bajar', 'Bajar horquillas'],
+  ['incAtras', 'Inclinar mástil hacia atrás'],
+  ['incAdelante', 'Inclinar mástil hacia adelante'],
+  ['camara', 'Cambiar cámara'],
+  ['reiniciar', 'Reiniciar ejercicio'],
+];
+let binds = store.get('binds') || {};
+const pads = () => [...navigator.getGamepads()];
+
+addEventListener('gamepadconnected', e => {
+  if (!Object.keys(binds).length && e.gamepad.mapping === 'standard') {
+    // mando estándar (tipo Xbox): mapeo por defecto, igual se puede reasignar
+    const p = e.gamepad.index, B = i => ({ pad: p, type: 'button', index: i });
+    binds = { direccion: { pad: p, type: 'axis', index: 0, rest: 0, full: 1 }, acelerador: B(7), freno: B(6),
+      marchaArriba: B(5), marchaAbajo: B(4), subir: B(12), bajar: B(13), incAtras: B(14), incAdelante: B(15), camara: B(3), reiniciar: B(9) };
+  }
+  say(`Mando detectado: ${e.gamepad.id}. ${Object.keys(binds).length ? '' : 'Configúralo en ⚙ Volante.'}`, 5000);
+});
+
+function raw(b) {
+  const p = navigator.getGamepads()[b.pad];
+  if (!p) return 0;
+  if (b.type === 'button') return p.buttons[b.index]?.value ?? 0;
+  const v = p.axes[b.index] ?? b.rest, span = b.full - b.rest;
+  return span ? (v - b.rest) / span : 0;
+}
+const val = (name, signed = false) => binds[name] ? clamp(raw(binds[name]), signed ? -1 : 0, 1) : 0;
+
+const keys = new Set(), keyEdges = new Set();
+addEventListener('keydown', e => {
+  if (cap && e.code === 'Escape') { cap = null; renderBinds(); return; }
+  if (!keys.has(e.code)) keyEdges.add(e.code);
+  keys.add(e.code);
+  if (e.code === 'Backspace') e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+const k = (...codes) => codes.some(c => keys.has(c)) ? 1 : 0;
+
+const prevBtn = {};
+function edge(name, ...codes) {
+  const on = val(name) > 0.5, was = prevBtn[name];
+  prevBtn[name] = on;
+  return (on && !was) || codes.some(c => keyEdges.has(c));
+}
+let kbSteer = 0;
+function readInput(dt) {
+  const target = k('KeyD', 'ArrowRight') - k('KeyA', 'ArrowLeft');
+  kbSteer = target ? clamp(kbSteer + target * 2.2 * dt, -1, 1) : kbSteer - Math.sign(kbSteer) * Math.min(Math.abs(kbSteer), 2.2 * dt);
+  const inp = {
+    steer: clamp(val('direccion', true) + kbSteer, -1, 1),
+    throttle: Math.max(val('acelerador'), k('KeyW', 'ArrowUp')),
+    brake: Math.max(val('freno'), k('KeyS', 'ArrowDown', 'Space')),
+    up: Math.max(val('subir'), k('KeyR')), down: Math.max(val('bajar'), k('KeyF')),
+    tiltBack: Math.max(val('incAtras'), k('KeyT')), tiltFwd: Math.max(val('incAdelante'), k('KeyG')),
+    gearUp: edge('marchaArriba', 'KeyE'), gearDown: edge('marchaAbajo', 'KeyQ'),
+    cam: edge('camara', 'KeyC'), reset: edge('reiniciar', 'Backspace'),
+  };
+  keyEdges.clear();
+  return inp;
+}
+
+// ---- pantalla de configuración: captura el control que se mueve ----
+let cap = null;
+function snapshot() { return pads().map(p => p && { axes: [...p.axes], buttons: p.buttons.map(b => b.pressed) }); }
+function capStep() {
+  const ps = pads();
+  if (!cap.found) {
+    ps.forEach((p, pi) => {
+      if (!p || cap.found) return;
+      const b0 = cap.base[pi];
+      p.axes.forEach((v, i) => {
+        const r = b0 ? b0.axes[i] : 0;
+        if (!cap.found && Math.abs(v - r) > 0.5) cap.found = { pad: pi, type: 'axis', index: i, rest: r, full: v, t: performance.now() };
+      });
+      p.buttons.forEach((b, i) => {
+        if (!cap.found && b.pressed && !(b0 && b0.buttons[i])) cap.found = { pad: pi, type: 'button', index: i };
+      });
+    });
+    if (cap.found?.type === 'button') capDone();
+  } else {
+    const f = cap.found, v = ps[f.pad]?.axes[f.index];
+    if (v !== undefined && Math.abs(v - f.rest) > Math.abs(f.full - f.rest)) f.full = v;
+    if (performance.now() - f.t > 900) capDone();
+  }
+}
+function capDone() {
+  const { t, ...b } = cap.found;
+  binds[cap.name] = b; store.set('binds', binds); cap = null; renderBinds();
+}
+const bindText = b => !b ? '—' : `mando ${b.pad} · ${b.type === 'axis' ? `eje ${b.index} (${b.rest.toFixed(2)} → ${b.full.toFixed(2)})` : `botón ${b.index}`}`;
+function renderBinds() {
+  $('binds').innerHTML = ACTIONS.map(([n, label]) => `<tr><td>${label}</td><td class="b">${bindText(binds[n])}</td>
+    <td>${cap?.name === n ? '<b>Esperando… mueve el control</b>' : `<button data-bind="${n}">Asignar</button>`}</td></tr>`).join('');
+}
+$('binds').addEventListener('click', e => {
+  const n = e.target.dataset?.bind;
+  if (n) { cap = { name: n, base: snapshot(), found: null }; renderBinds(); }
+});
+$('btnCfg').onclick = () => { $('cfg').style.display = 'block'; renderBinds(); };
+$('cfgClose').onclick = () => { $('cfg').style.display = 'none'; cap = null; };
+$('cfgReset').onclick = () => { binds = {}; store.set('binds', binds); renderBinds(); };
+$('btnCam').onclick = () => { G.cam = (G.cam + 1) % 3; };
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => reset(b.dataset.mode));
+let rawTick = 0;
+function showRaw() {
+  const txt = pads().filter(Boolean).map(p => `[${p.index}] ${p.id}\n  ejes: ${p.axes.map((a, i) => `${i}:${a.toFixed(2)}`).join('  ')}\n  botones: ${
+    p.buttons.map((b, i) => b.value > 0.05 ? `${i}:${b.value.toFixed(2)}` : '').filter(Boolean).join('  ') || '—'}`).join('\n');
+  $('raw').textContent = txt || 'Sin mandos detectados: presiona un botón del volante.';
+}
+
+// ---------------- simulación ----------------
+function supportFor(st) {
+  const c = S.carry, [px, pz] = toW(st, c.lx, c.lz), yaw = st.yaw + c.lyaw, base = st.forkH - 0.07;
+  const inBay = Math.abs(px - RACK.x) < 0.25 && Math.abs(pz - RACK.z) < 0.2 && Math.abs(Math.cos(yaw)) > Math.cos(10 * Math.PI / 180);
+  if (!inBay) return 0;
+  return RACK.levels.filter(l => l <= base + 0.02).pop() ?? 0;
+}
+
+function step(dt, inp) {
+  if (inp.reset) return reset();
+  if (inp.cam) G.cam = (G.cam + 1) % 3;
+
+  // marcha (secuencial: R ← N → F); sólo detenido, como en una grúa real
+  for (const d of [inp.gearUp ? 1 : 0, inp.gearDown ? -1 : 0]) {
+    if (!d) continue;
+    if (Math.abs(S.v) > 0.2) { say('Detente antes de cambiar de marcha'); continue; }
+    S.gear = ['R', 'N', 'F'][clamp(['R', 'N', 'F'].indexOf(S.gear) + d, 0, 2)];
+  }
+
+  // velocidad
+  const dir = S.gear === 'F' ? 1 : S.gear === 'R' ? -1 : 0;
+  const decel = 4.5 * inp.brake + (inp.throttle < 0.05 || !dir ? 0.8 : 0.15);
+  S.v -= Math.sign(S.v) * Math.min(Math.abs(S.v), decel * dt);
+  S.v = clamp(S.v + dir * 2.0 * inp.throttle * dt, -2.5, 3.5);
+  S.steer = inp.steer;
+
+  // movimiento: pivote en el eje delantero, la cola gira (dirección trasera)
+  const yaw = S.yaw - S.v * Math.tan(S.steer * MAXSTEER) / L * dt;
+  const moved = { ...S, yaw, x: S.x + S.v * Math.sin(S.yaw) * dt, z: S.z + S.v * Math.cos(S.yaw) * dt };
+  if (S.v !== 0) {
+    const r = collide(moved);
+    r.hitCones.forEach(knockCone);
+    if (r.block.length) {
+      if (Math.abs(S.v) > 0.15) penal('choque', 5, `¡Choque con ${r.block[0]}!`);
+      S.v = 0;
+    } else Object.assign(S, { x: moved.x, z: moved.z, yaw: moved.yaw });
+  }
+
+  // horquillas: subir/bajar + enganchar/soltar pallet
+  const nf = clamp(S.forkH + (inp.up - inp.down) * 0.45 * dt, 0, 3.3);
+  if (nf !== S.forkH) {
+    if (!S.carry && nf > S.forkH) {
+      for (const p of pallets) {
+        if (pocketOK(S, p) && S.forkH <= p.base + 0.07 && nf >= p.base + 0.07) {
+          if (insertion(S, p) < 0.9) { say('Mete las horquillas hasta el fondo antes de levantar'); break; }
+          const pp = palletPose(p), dx = pp.x - S.x, dz = pp.z - S.z, c = Math.cos(S.yaw), s = Math.sin(S.yaw);
+          S.carry = { p, lx: dx * c - dz * s, lz: dx * s + dz * c, lyaw: pp.yaw - S.yaw };
+          say('Pallet enganchado. Inclina el mástil hacia atrás y viaja con la carga abajo.');
+          break;
+        }
+      }
+    } else if (S.carry && nf < S.forkH) {
+      const sup = supportFor(S);
+      if (nf - 0.07 <= sup) {
+        const c = S.carry, [px, pz] = toW(S, c.lx, c.lz);
+        c.p.base = sup; c.p.g.position.set(px, sup, pz); c.p.g.rotation.set(0, S.yaw + c.lyaw, 0);
+        S.carry = null;
+        say(sup > 0 ? `Pallet dejado en el rack a ${sup.toFixed(1)} m` : 'Pallet en el suelo');
+      }
+    }
+    const r = collide({ ...S, forkH: nf });
+    r.hitCones.forEach(knockCone);
+    if (r.block.length) say('Las horquillas topan: revisa altura y alineación');
+    else S.forkH = nf;
+  }
+  S.tilt = clamp(S.tilt + (inp.tiltBack - inp.tiltFwd) * 6 * dt, -5, 8);
+
+  if (S.forkH > 0.4 && Math.abs(S.v) > 0.6) penal('alto', 5, 'Desplazamiento con horquillas en alto', 3);
+  exercise(dt);
+}
+
+function knockCone(c) {
+  c.active = false;
+  c.m.rotation.z = Math.PI / 2; c.m.position.y = 0.18;
+  c.m.position.x += Math.sin(S.yaw) * 0.5; c.m.position.z += Math.cos(S.yaw) * 0.5;
+  penal('cono' + c.z, 5, 'Cono botado', 0);
+}
+
+function exercise(dt) {
+  if (G.running) G.t += dt;
+  if (G.mode === 'conos') {
+    if (G.phase === 'listo' && S.z > 2) { G.phase = 'ida'; G.running = true; }
+    if (G.phase === 'ida') {
+      cones.forEach((c, i) => {
+        if (prevZ < c.z && S.z >= c.z && Math.sign(S.x - c.x) !== (i % 2 ? -1 : 1)) penal('lado' + i, 10, 'Cono pasado por el lado equivocado', 0);
+      });
+      if (S.z > END_Z) { G.phase = 'vuelta'; say('¡Ahora vuelve en REVERSA al cuadro de partida!', 4000); }
+    }
+    if (G.phase === 'vuelta') {
+      if (S.gear === 'F' && S.v > 0.3) penal('marcha', 5, 'La vuelta es en reversa', 3);
+      if (S.z < 0 && Math.abs(S.x - CONE_X) < 1.2 && Math.abs(S.v) < 0.1) finish();
+    }
+  } else if (G.mode === 'rack') {
+    if (G.phase === 'listo' && (Math.abs(S.v) > 0.05 || S.forkH !== 0.1)) { G.phase = 'trabajando'; G.running = true; }
+    const p = pallets[0];
+    if (G.phase === 'trabajando' && !S.carry && p.base === RACK.levels[0] && S.forkH < 0.3 && S.z < RACK.z - 3.5) finish();
+  }
+  prevZ = S.z;
+}
+
+// ---------------- render ----------------
+const v3 = (x, y, z) => truck.localToWorld(new THREE.Vector3(x, y, z));
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
+function sync(dt) {
+  truck.position.set(S.x, 0, S.z); truck.rotation.y = S.yaw;
+  rearPivots.forEach(g => g.rotation.y = S.steer * MAXSTEER);
+  frontWheels.forEach(w => w.rotation.x += S.v * dt / 0.32);
+  carriage.position.y = S.forkH;
+  mast.rotation.x = -S.tilt * Math.PI / 180;
+  if (S.carry) {
+    const c = S.carry, [px, pz] = toW(S, c.lx, c.lz);
+    c.p.g.position.set(px, S.forkH - 0.07, pz); c.p.g.rotation.set(0, S.yaw + c.lyaw, 0);
+  }
+  truck.updateMatrixWorld();
+
+  let pos, look;
+  if (G.cam === 0) {                         // cabina: el operador se da vuelta en reversa
+    G.camYaw += ((S.gear === 'R' ? Math.PI : 0) - G.camYaw) * Math.min(1, dt * 4);
+    pos = v3(0, 2.0, -0.9);
+    look = v3(4.9 * Math.sin(G.camYaw), 0.9, -0.9 + 4.9 * Math.cos(G.camYaw));
+  } else if (G.cam === 1) { pos = v3(0, 3.4, -7); look = v3(0, 1, 1.5); }
+  else { pos = new THREE.Vector3(S.x, 17, S.z - 0.01); look = new THREE.Vector3(S.x, 0, S.z); }
+  const a = G.cam === 0 ? 1 : Math.min(1, dt * 6);
+  camPos.lerp(pos, a); camLook.lerp(look, a);
+  camera.position.copy(camPos); camera.lookAt(camLook);
+}
+
+let hudTick = 0;
+function hud() {
+  const best = store.get('mejor-' + G.mode), pad = pads().find(Boolean);
+  $('hud').innerHTML = `Marcha: <b>${S.gear === 'F' ? 'Adelante' : S.gear === 'R' ? 'Reversa' : 'Neutro'}</b> · ${(Math.abs(S.v) * 3.6).toFixed(1)} km/h<br>
+    Horquillas: <b>${S.forkH.toFixed(2)} m</b> · Mástil: ${S.tilt >= 0 ? '+' : ''}${S.tilt.toFixed(1)}°<br>
+    Carga: ${S.carry ? '<b>Sí</b>' : 'No'}<br>
+    ${G.mode === 'libre' ? 'Modo libre' : `Tiempo: <b>${fmt(G.t)}</b> · Penalización: <b>+${G.pen} s</b><br>Mejor: ${best == null ? '—' : fmt(best)}`}<br>
+    <span style="color:#9ab">${pad ? 'Volante: ' + pad.id.slice(0, 32) : 'Volante: no detectado (presiona un botón)'}</span>`;
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (cap) capStep();
+  if ($('cfg').style.display === 'block' && (rawTick += dt) > 0.15) { rawTick = 0; showRaw(); }
+  step(dt, readInput(dt));
+  sync(dt);
+  if ((hudTick += dt) > 0.1) { hudTick = 0; hud(); }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+window.__sim = { S, G, pallets, reset };   // para pruebas automáticas (test.mjs)
+reset('conos');
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
